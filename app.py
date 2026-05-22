@@ -6,6 +6,7 @@ A Streamlit application for vendors to submit candidate profiles and admins to m
 import streamlit as st
 import pandas as pd
 import os
+import subprocess
 from datetime import datetime
 import json
 import io
@@ -71,6 +72,29 @@ def load_submissions_log():
 
 def save_submission_log(log_df):
     """Save submissions log"""
+    log_df.to_csv(SUBMISSIONS_LOG, index=False)
+
+def git_commit_submission(vendor_name, candidate_name, req_id, file_paths):
+    """Commit uploaded documents and updated log to git repository."""
+    try:
+        repo_root = Path(__file__).parent
+        files_to_add = [str(SUBMISSIONS_LOG)] + [str(p) for p in file_paths]
+        subprocess.run(
+            ["git", "add"] + files_to_add,
+            cwd=repo_root, check=True, capture_output=True
+        )
+        commit_msg = f"submission: {vendor_name} - {candidate_name} for {req_id}"
+        subprocess.run(
+            ["git", "commit", "-m", commit_msg],
+            cwd=repo_root, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "push"],
+            cwd=repo_root, check=True, capture_output=True
+        )
+    except subprocess.CalledProcessError:
+        pass  # Don't block the user if git operations fail
+
 def load_vendor_limits():
     """Load vendor-specific submission limits from JSON file"""
     if VENDOR_LIMITS_FILE.exists():
@@ -493,7 +517,15 @@ def vendor_portal():
                     new_row = pd.DataFrame([submission_data])
                     log_df = pd.concat([log_df, new_row], ignore_index=True)
                     save_submission_log(log_df)
-                    
+
+                    # Commit uploaded files and updated log to git
+                    git_commit_submission(
+                        st.session_state.vendor_name,
+                        candidate_name,
+                        req_id,
+                        [resume_path, id_path, sheet_path]
+                    )
+
                     # Set submission success flag
                     st.session_state.submission_success = True
                     st.success(f"✅ Profile submitted successfully for {candidate_name}!")
