@@ -6,8 +6,8 @@ A Streamlit application for vendors to submit candidate profiles and admins to m
 import streamlit as st
 import pandas as pd
 import os
-import subprocess
 import uuid
+import requests
 from datetime import datetime
 import json
 import io
@@ -23,6 +23,9 @@ UPLOADS_DIR = DATA_DIR / "uploads"
 VENDORS_FILE = DATA_DIR / "vendors.json"
 VENDOR_LIMITS_FILE = DATA_DIR / "vendor_limits.json"
 SESSIONS_FILE = DATA_DIR / "sessions.json"
+
+GITHUB_REPO_OWNER = "pushpakkmohanty"
+GITHUB_REPO_NAME = "vms_portal"
 
 # Create directories if they don't exist
 for directory in [DATA_DIR, SUBMISSIONS_DIR, UPLOADS_DIR]:
@@ -113,26 +116,33 @@ def save_submission_log(log_df):
     """Save submissions log"""
     log_df.to_csv(SUBMISSIONS_LOG, index=False)
 
-def git_commit_submission(vendor_name, candidate_name, req_id, file_paths):
-    """Commit uploaded documents and updated log to git repository."""
-    try:
-        repo_root = Path(__file__).parent
-        files_to_add = [str(SUBMISSIONS_LOG)] + [str(p) for p in file_paths]
-        subprocess.run(
-            ["git", "add"] + files_to_add,
-            cwd=repo_root, check=True, capture_output=True
-        )
-        commit_msg = f"submission: {vendor_name} - {candidate_name} for {req_id}"
-        subprocess.run(
-            ["git", "commit", "-m", commit_msg],
-            cwd=repo_root, check=True, capture_output=True
-        )
-        subprocess.run(
-            ["git", "push"],
-            cwd=repo_root, check=True, capture_output=True
-        )
-    except subprocess.CalledProcessError:
-        pass  # Don't block the user if git operations fail
+def _push_file_to_github(local_path, repo_path, token, commit_msg):
+    """Push a single file to GitHub via REST API."""
+    url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/contents/{repo_path}"
+    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+    with open(local_path, 'rb') as f:
+        content_b64 = base64.b64encode(f.read()).decode('utf-8')
+    r = requests.get(url, headers=headers)
+    sha = r.json().get('sha') if r.status_code == 200 else None
+    payload = {"message": commit_msg, "content": content_b64}
+    if sha:
+        payload["sha"] = sha
+    requests.put(url, json=payload, headers=headers)
+
+def push_submission_to_github(vendor_name, candidate_name, req_id, timestamp, file_paths):
+    """Upload vendor submission files to GitHub under portal_data/uploads/<vendor>/<req_id>/<timestamp>/"""
+    token = os.environ.get('GITHUB_TOKEN')
+    if not token:
+        return
+    commit_msg = f"submission: {vendor_name} - {candidate_name} for {req_id}"
+    for local_path in file_paths:
+        local_path = Path(local_path)
+        if not local_path.exists():
+            continue
+        repo_path = f"portal_data/uploads/{vendor_name}/{req_id}/{timestamp}/{local_path.name}"
+        _push_file_to_github(str(local_path), repo_path, token, commit_msg)
+    if Path(SUBMISSIONS_LOG).exists():
+        _push_file_to_github(str(SUBMISSIONS_LOG), "portal_data/submissions_log.csv", token, commit_msg)
 
 def load_vendor_limits():
     """Load vendor-specific submission limits from JSON file"""
@@ -566,11 +576,12 @@ def vendor_portal():
                     log_df = pd.concat([log_df, new_row], ignore_index=True)
                     save_submission_log(log_df)
 
-                    # Commit uploaded files and updated log to git
-                    git_commit_submission(
+                    # Push uploaded files and updated log to GitHub
+                    push_submission_to_github(
                         st.session_state.vendor_name,
                         candidate_name,
                         req_id,
+                        timestamp,
                         [resume_path, id_path, sheet_path]
                     )
 
@@ -1427,3 +1438,4 @@ if __name__ == "__main__":
     main()
 
 # Made with Bob
+
