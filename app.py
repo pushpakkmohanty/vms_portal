@@ -118,31 +118,45 @@ def save_submission_log(log_df):
 
 def _push_file_to_github(local_path, repo_path, token, commit_msg):
     """Push a single file to GitHub via REST API."""
-    url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/contents/{repo_path}"
-    headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
-    with open(local_path, 'rb') as f:
-        content_b64 = base64.b64encode(f.read()).decode('utf-8')
-    r = requests.get(url, headers=headers)
-    sha = r.json().get('sha') if r.status_code == 200 else None
-    payload = {"message": commit_msg, "content": content_b64}
-    if sha:
-        payload["sha"] = sha
-    requests.put(url, json=payload, headers=headers)
+    try:
+        url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/contents/{repo_path}"
+        headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+        with open(local_path, 'rb') as f:
+            content_b64 = base64.b64encode(f.read()).decode('utf-8')
+        r = requests.get(url, headers=headers)
+        sha = r.json().get('sha') if r.status_code == 200 else None
+        payload = {"message": commit_msg, "content": content_b64}
+        if sha:
+            payload["sha"] = sha
+        response = requests.put(url, json=payload, headers=headers)
+        return response.status_code in [200, 201]
+    except Exception as e:
+        print(f"Error pushing file to GitHub: {str(e)}")
+        return False
 
 def push_submission_to_github(vendor_name, candidate_name, req_id, timestamp, file_paths):
     """Upload vendor submission files to GitHub under portal_data/uploads/<vendor>/<req_id>/<timestamp>/"""
     token = os.environ.get('GITHUB_TOKEN')
     if not token:
-        return
+        st.warning("⚠️ Note: GitHub token not configured. Files saved locally but not synced to GitHub.")
+        return False
+    
     commit_msg = f"submission: {vendor_name} - {candidate_name} for {req_id}"
+    success_count = 0
+    
     for local_path in file_paths:
         local_path = Path(local_path)
         if not local_path.exists():
             continue
         repo_path = f"portal_data/uploads/{vendor_name}/{req_id}/{timestamp}/{local_path.name}"
-        _push_file_to_github(str(local_path), repo_path, token, commit_msg)
+        if _push_file_to_github(str(local_path), repo_path, token, commit_msg):
+            success_count += 1
+    
+    # Push updated submissions log
     if Path(SUBMISSIONS_LOG).exists():
         _push_file_to_github(str(SUBMISSIONS_LOG), "portal_data/submissions_log.csv", token, commit_msg)
+    
+    return success_count > 0
 
 def load_vendor_limits():
     """Load vendor-specific submission limits from JSON file"""
@@ -1082,7 +1096,7 @@ def view_submissions():
                         st.rerun()
                 else:
                     # Show confirmation dialog
-                    st.warning(f"⚠️ **Are you sure you want to delete this submission?**\n\nCandidate: **{row['candidate_name']}**\n\nThis will permanently delete:\n- Submission record\n- All uploaded files (resume, ID, submission sheet)\n- Complete candidate folder")
+                    st.warning(f"⚠️ **Are you sure you want to delete this submission?**\n\nCandidate: **{row['candidate_name']}**\n\nThis will permanently delete all associated files.")
                     
                     col_confirm1, col_confirm2 = st.columns(2)
                     with col_confirm1:
@@ -1289,7 +1303,7 @@ def manage_vendor_limits():
         limits_data = []
         for key, limit in vendor_limits.items():
             vendor_name, req_id = key.split('|')
-            vendor_company = vendors.get(vendor_name, {}).get('company', vendor_name)
+            vendor_company = vendors.get(vendor_name, {}).get('company_name', vendor_name)
             req_title = requirements.get(req_id, {}).get('title', req_id)
             limits_data.append({
                 'Vendor': vendor_company,
@@ -1328,7 +1342,7 @@ def manage_vendor_limits():
         
         with col1:
             # Vendor selection
-            vendor_options = {v: vendors[v].get('company', v) for v in vendors.keys()}
+            vendor_options = {v: vendors[v].get('company_name', v) for v in vendors.keys()}
             selected_vendor = st.selectbox(
                 "Select Vendor *",
                 options=list(vendor_options.keys()),
@@ -1369,7 +1383,7 @@ def manage_vendor_limits():
                 st.error("❌ Please select both vendor and requirement")
             else:
                 set_vendor_submission_limit(selected_vendor, selected_req, new_limit)
-                vendor_company = vendors[selected_vendor].get('company', selected_vendor)
+                vendor_company = vendors[selected_vendor].get('company_name', selected_vendor)
                 req_title = requirements[selected_req]['title']
                 st.success(f"✅ Custom limit of **{new_limit}** submissions set for **{vendor_company}** on requirement **{req_title}**")
                 st.rerun()
@@ -1384,7 +1398,7 @@ def manage_vendor_limits():
     if not log_df.empty:
         status_data = []
         for vendor_name in vendors.keys():
-            vendor_company = vendors[vendor_name].get('company', vendor_name)
+            vendor_company = vendors[vendor_name].get('company_name', vendor_name)
             for req_id in requirements.keys():
                 req_title = requirements[req_id]['title']
                 submission_count = count_vendor_submissions(vendor_name, req_id)
@@ -1438,4 +1452,3 @@ if __name__ == "__main__":
     main()
 
 # Made with Bob
-
