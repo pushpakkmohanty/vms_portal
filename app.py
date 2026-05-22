@@ -8,11 +8,13 @@ import pandas as pd
 import os
 import uuid
 import requests
+import subprocess
 from datetime import datetime
 import json
 import io
 from pathlib import Path
 import base64
+import shutil
 
 # Configuration
 DATA_DIR = Path("portal_data")
@@ -26,6 +28,7 @@ SESSIONS_FILE = DATA_DIR / "sessions.json"
 
 GITHUB_REPO_OWNER = "pushpakkmohanty"
 GITHUB_REPO_NAME = "vms_portal"
+GITHUB_REPO_URL = "https://github.com/pushpakkmohanty/vms_portal"
 
 # Create directories if they don't exist
 for directory in [DATA_DIR, SUBMISSIONS_DIR, UPLOADS_DIR]:
@@ -41,6 +44,86 @@ if 'vendor_name' not in st.session_state:
 
 # Admin credentials (in production, use proper authentication)
 ADMIN_PASSWORD = "admin123"
+
+def setup_git_config():
+    """Setup Git configuration with GitHub token"""
+    try:
+        github_token = os.environ.get('GITHUB_TOKEN')
+        if not github_token:
+            return False
+        
+        # Configure git credentials
+        subprocess.run(
+            ['git', 'config', '--global', 'user.email', '2k.pushpak@gmail.com'],
+            check=True,
+            capture_output=True
+        )
+        subprocess.run(
+            ['git', 'config', '--global', 'user.name', 'VMS Portal Bot'],
+            check=True,
+            capture_output=True
+        )
+        
+        # Configure git credential helper to use token
+        repo_dir = Path.cwd()
+        subprocess.run(
+            ['git', 'remote', 'set-url', 'origin', 
+             f'https://{github_token}@github.com/pushpakkmohanty/vms_portal.git'],
+            cwd=repo_dir,
+            check=True,
+            capture_output=True
+        )
+        return True
+    except Exception as e:
+        print(f"Error setting up git config: {str(e)}")
+        return False
+
+def push_to_github(file_path, commit_msg):
+    """Push uploaded files to GitHub using git"""
+    try:
+        github_token = os.environ.get('GITHUB_TOKEN')
+        if not github_token:
+            return False
+        
+        repo_dir = Path.cwd()
+        
+        # Add the file
+        subprocess.run(
+            ['git', 'add', str(file_path)],
+            cwd=repo_dir,
+            check=True,
+            capture_output=True,
+            timeout=30
+        )
+        
+        # Commit the file
+        subprocess.run(
+            ['git', 'commit', '-m', commit_msg],
+            cwd=repo_dir,
+            check=True,
+            capture_output=True,
+            timeout=30
+        )
+        
+        # Push to GitHub
+        result = subprocess.run(
+            ['git', 'push', 'origin', 'main'],
+            cwd=repo_dir,
+            check=True,
+            capture_output=True,
+            timeout=60
+        )
+        
+        return True
+    except subprocess.TimeoutExpired:
+        print("Git push operation timed out")
+        return False
+    except subprocess.CalledProcessError as e:
+        print(f"Git error: {e.stderr.decode() if e.stderr else 'Unknown error'}")
+        return False
+    except Exception as e:
+        print(f"Error pushing to GitHub: {str(e)}")
+        return False
 
 def load_vendors():
     """Load vendors from JSON file"""
@@ -116,47 +199,42 @@ def save_submission_log(log_df):
     """Save submissions log"""
     log_df.to_csv(SUBMISSIONS_LOG, index=False)
 
-def _push_file_to_github(local_path, repo_path, token, commit_msg):
-    """Push a single file to GitHub via REST API."""
+def sync_submission_to_github(vendor_name, candidate_name, req_id, timestamp, file_paths):
+    """Sync vendor submission files to GitHub repository"""
     try:
-        url = f"https://api.github.com/repos/{GITHUB_REPO_OWNER}/{GITHUB_REPO_NAME}/contents/{repo_path}"
-        headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
-        with open(local_path, 'rb') as f:
-            content_b64 = base64.b64encode(f.read()).decode('utf-8')
-        r = requests.get(url, headers=headers)
-        sha = r.json().get('sha') if r.status_code == 200 else None
-        payload = {"message": commit_msg, "content": content_b64}
-        if sha:
-            payload["sha"] = sha
-        response = requests.put(url, json=payload, headers=headers)
-        return response.status_code in [200, 201]
+        if not os.environ.get('GITHUB_TOKEN'):
+            st.warning("⚠️ GitHub token not configured. Files saved locally in `portal_data/uploads/`")
+            return False
+        
+        # Setup git configuration
+        if not setup_git_config():
+            st.warning("⚠️ Could not configure Git. Files saved locally.")
+            return False
+        
+        # Commit and push each file
+        success_count = 0
+        for file_path in file_paths:
+            file_path = Path(file_path)
+            if not file_path.exists():
+                continue
+            
+            commit_msg = f"submission: {vendor_name} - {candidate_name} for {req_id}"
+            if push_to_github(file_path, commit_msg):
+                success_count += 1
+        
+        # Also sync the submissions log
+        if Path(SUBMISSIONS_LOG).exists():
+            commit_msg = f"submissions_log: Updated after {candidate_name} submission"
+            push_to_github(SUBMISSIONS_LOG, commit_msg)
+        
+        if success_count > 0:
+            st.success(f"✅ Files synced to GitHub repository!")
+            return True
+        return False
     except Exception as e:
-        print(f"Error pushing file to GitHub: {str(e)}")
+        print(f"Error syncing to GitHub: {str(e)}")
+        st.warning(f"⚠️ Local save successful, but GitHub sync failed: {str(e)}")
         return False
-
-def push_submission_to_github(vendor_name, candidate_name, req_id, timestamp, file_paths):
-    """Upload vendor submission files to GitHub under portal_data/uploads/<vendor>/<req_id>/<timestamp>/"""
-    token = os.environ.get('GITHUB_TOKEN')
-    if not token:
-        st.warning("⚠️ Note: GitHub token not configured. Files saved locally but not synced to GitHub.")
-        return False
-    
-    commit_msg = f"submission: {vendor_name} - {candidate_name} for {req_id}"
-    success_count = 0
-    
-    for local_path in file_paths:
-        local_path = Path(local_path)
-        if not local_path.exists():
-            continue
-        repo_path = f"portal_data/uploads/{vendor_name}/{req_id}/{timestamp}/{local_path.name}"
-        if _push_file_to_github(str(local_path), repo_path, token, commit_msg):
-            success_count += 1
-    
-    # Push updated submissions log
-    if Path(SUBMISSIONS_LOG).exists():
-        _push_file_to_github(str(SUBMISSIONS_LOG), "portal_data/submissions_log.csv", token, commit_msg)
-    
-    return success_count > 0
 
 def load_vendor_limits():
     """Load vendor-specific submission limits from JSON file"""
@@ -552,59 +630,60 @@ def vendor_portal():
                 elif not submission_sheet:
                     st.error("❌ Submission Excel sheet is required")
                 else:
-                    # Save files
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    vendor_folder = UPLOADS_DIR / st.session_state.vendor_name / req_id / timestamp
-                    vendor_folder.mkdir(parents=True, exist_ok=True)
-                    
-                    # Save uploaded files
-                    resume_path = vendor_folder / f"resume_{resume_file.name}"
-                    id_path = vendor_folder / f"id_{id_file.name}"
-                    sheet_path = vendor_folder / f"submission_{submission_sheet.name}"
-                    
-                    with open(resume_path, 'wb') as f:
-                        f.write(resume_file.getbuffer())
-                    with open(id_path, 'wb') as f:
-                        f.write(id_file.getbuffer())
-                    with open(sheet_path, 'wb') as f:
-                        f.write(submission_sheet.getbuffer())
-                    
-                    # Save submission metadata
-                    submission_data = {
-                        'timestamp': datetime.now().isoformat(),
-                        'vendor_name': st.session_state.vendor_name,
-                        'req_id': req_id,
-                        'candidate_name': candidate_name,
-                        'candidate_email': candidate_email,
-                        'candidate_phone': candidate_phone,
-                        'resume_file': str(resume_path),
-                        'id_file': str(id_path),
-                        'submission_sheet': str(sheet_path),
-                        'additional_notes': additional_notes,
-                        'status': 'submitted'
-                    }
-                    
-                    # Update log
-                    log_df = load_submissions_log()
-                    new_row = pd.DataFrame([submission_data])
-                    log_df = pd.concat([log_df, new_row], ignore_index=True)
-                    save_submission_log(log_df)
+                    with st.spinner("📤 Processing your submission..."):
+                        # Save files to local directory
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        vendor_folder = UPLOADS_DIR / st.session_state.vendor_name / req_id / timestamp
+                        vendor_folder.mkdir(parents=True, exist_ok=True)
+                        
+                        # Save uploaded files
+                        resume_path = vendor_folder / f"resume_{resume_file.name}"
+                        id_path = vendor_folder / f"id_{id_file.name}"
+                        sheet_path = vendor_folder / f"submission_{submission_sheet.name}"
+                        
+                        with open(resume_path, 'wb') as f:
+                            f.write(resume_file.getbuffer())
+                        with open(id_path, 'wb') as f:
+                            f.write(id_file.getbuffer())
+                        with open(sheet_path, 'wb') as f:
+                            f.write(submission_sheet.getbuffer())
+                        
+                        # Save submission metadata
+                        submission_data = {
+                            'timestamp': datetime.now().isoformat(),
+                            'vendor_name': st.session_state.vendor_name,
+                            'req_id': req_id,
+                            'candidate_name': candidate_name,
+                            'candidate_email': candidate_email,
+                            'candidate_phone': candidate_phone,
+                            'resume_file': str(resume_path),
+                            'id_file': str(id_path),
+                            'submission_sheet': str(sheet_path),
+                            'additional_notes': additional_notes,
+                            'status': 'submitted'
+                        }
+                        
+                        # Update log
+                        log_df = load_submissions_log()
+                        new_row = pd.DataFrame([submission_data])
+                        log_df = pd.concat([log_df, new_row], ignore_index=True)
+                        save_submission_log(log_df)
 
-                    # Push uploaded files and updated log to GitHub
-                    push_submission_to_github(
-                        st.session_state.vendor_name,
-                        candidate_name,
-                        req_id,
-                        timestamp,
-                        [resume_path, id_path, sheet_path]
-                    )
+                        # Sync to GitHub (optional - won't fail if token not set)
+                        sync_submission_to_github(
+                            st.session_state.vendor_name,
+                            candidate_name,
+                            req_id,
+                            timestamp,
+                            [resume_path, id_path, sheet_path]
+                        )
 
-                    # Set submission success flag
-                    st.session_state.submission_success = True
-                    st.success(f"✅ Profile submitted successfully for {candidate_name}!")
-                    st.balloons()
-                    st.info("💡 To submit another candidate, please select a different requirement from the dropdown above.")
-                    st.rerun()
+                        # Set submission success flag
+                        st.session_state.submission_success = True
+                        st.success(f"✅ Profile submitted successfully for {candidate_name}!")
+                        st.balloons()
+                        st.info("💡 To submit another candidate, please select a different requirement from the dropdown above.")
+                        st.rerun()
     else:
         # Show success message and instructions
         st.success("✅ Candidate profile submitted successfully!")
@@ -1113,7 +1192,6 @@ def view_submissions():
                                     candidate_folder = Path(row['resume_file']).parent
                                     if candidate_folder.exists():
                                         # Delete entire folder with all contents
-                                        import shutil
                                         shutil.rmtree(candidate_folder)
                                         deleted_files = True
                             except Exception as e:
