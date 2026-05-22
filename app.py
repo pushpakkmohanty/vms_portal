@@ -115,8 +115,6 @@ def load_submissions_log():
 def save_submission_log(log_df):
     """Save submissions log"""
     log_df.to_csv(SUBMISSIONS_LOG, index=False)
-    
-export GITHUB_TOKEN = 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
 
 def _push_file_to_github(local_path, repo_path, token, commit_msg):
     """Push a single file to GitHub via REST API."""
