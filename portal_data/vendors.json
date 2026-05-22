@@ -1,0 +1,22 @@
+{
+  "tanishasystems": {
+    "company_name": "Tanisha Syatems Inc",
+    "email": "sayantani@tanishasystems.com",
+    "phone": "",
+    "password": "tanisha123",
+    "contact_person": "sayantani",
+    "status": "active",
+    "created_date": "2026-05-19T19:27:47.280410",
+    "total_submissions": 0
+  },
+  "vrntech": {
+    "company_name": "vrntech inc",
+    "email": "vamshi@vrntech.us",
+    "phone": "",
+    "password": "vrn123",
+    "contact_person": "vamshi",
+    "status": "active",
+    "created_date": "2026-05-19T20:21:50.830897",
+    "total_submissions": 0
+  }
+}
