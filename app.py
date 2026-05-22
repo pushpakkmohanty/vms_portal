@@ -7,6 +7,7 @@ import streamlit as st
 import pandas as pd
 import os
 import subprocess
+import uuid
 from datetime import datetime
 import json
 import io
@@ -21,6 +22,7 @@ SUBMISSIONS_LOG = DATA_DIR / "submissions_log.csv"
 UPLOADS_DIR = DATA_DIR / "uploads"
 VENDORS_FILE = DATA_DIR / "vendors.json"
 VENDOR_LIMITS_FILE = DATA_DIR / "vendor_limits.json"
+SESSIONS_FILE = DATA_DIR / "sessions.json"
 
 # Create directories if they don't exist
 for directory in [DATA_DIR, SUBMISSIONS_DIR, UPLOADS_DIR]:
@@ -48,6 +50,43 @@ def save_vendors(vendors):
     """Save vendors to JSON file"""
     with open(VENDORS_FILE, 'w') as f:
         json.dump(vendors, f, indent=2)
+
+def load_sessions():
+    if SESSIONS_FILE.exists():
+        with open(SESSIONS_FILE, 'r') as f:
+            return json.load(f)
+    return {}
+
+def save_sessions(sessions):
+    with open(SESSIONS_FILE, 'w') as f:
+        json.dump(sessions, f, indent=2)
+
+def create_session(user_type, vendor_name=None):
+    sessions = load_sessions()
+    token = str(uuid.uuid4())
+    sessions[token] = {'user_type': user_type, 'vendor_name': vendor_name}
+    save_sessions(sessions)
+    return token
+
+def delete_session(token):
+    sessions = load_sessions()
+    if token in sessions:
+        del sessions[token]
+        save_sessions(sessions)
+
+def restore_session():
+    """Restore login state from URL query param on page refresh."""
+    if st.session_state.logged_in:
+        return
+    token = st.query_params.get("session")
+    if not token:
+        return
+    session_data = load_sessions().get(token)
+    if session_data:
+        st.session_state.logged_in = True
+        st.session_state.user_type = session_data['user_type']
+        st.session_state.vendor_name = session_data.get('vendor_name')
+        st.session_state.session_token = token
 
 def load_requirements():
     """Load requirements from JSON file"""
@@ -314,9 +353,12 @@ def login_page():
                 elif vendors[vendor_name]['status'] != 'active':
                     st.error("❌ Your account is inactive. Please contact admin.")
                 else:
+                    token = create_session("vendor", vendor_name)
                     st.session_state.logged_in = True
                     st.session_state.user_type = "vendor"
                     st.session_state.vendor_name = vendor_name
+                    st.session_state.session_token = token
+                    st.query_params["session"] = token
                     st.success("✅ Login successful! Redirecting...")
                     st.rerun()
         
@@ -333,8 +375,11 @@ def login_page():
             
             if admin_submit:
                 if admin_password == ADMIN_PASSWORD:
+                    token = create_session("admin")
                     st.session_state.logged_in = True
                     st.session_state.user_type = "admin"
+                    st.session_state.session_token = token
+                    st.query_params["session"] = token
                     st.success("✅ Admin login successful! Redirecting...")
                     st.rerun()
                 else:
@@ -357,9 +402,12 @@ def vendor_portal():
     st.write(f"Welcome, **{st.session_state.vendor_name}**!")
     
     if st.button("Logout", key="vendor_logout"):
+        delete_session(st.session_state.get("session_token", ""))
         st.session_state.logged_in = False
         st.session_state.user_type = None
         st.session_state.vendor_name = None
+        st.session_state.session_token = None
+        st.query_params.clear()
         st.rerun()
     
     st.divider()
@@ -688,8 +736,11 @@ def admin_portal():
     st.title("⚙️ Admin Portal")
     
     if st.button("Logout", key="admin_logout"):
+        delete_session(st.session_state.get("session_token", ""))
         st.session_state.logged_in = False
         st.session_state.user_type = None
+        st.session_state.session_token = None
+        st.query_params.clear()
         st.rerun()
     
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["👥 Manage Vendors", "📋 Manage Requirements", "📊 View Submissions", "📈 Analytics", "🎯 Vendor Limits"])
@@ -1363,6 +1414,8 @@ def main():
         </style>
     """, unsafe_allow_html=True)
     
+    restore_session()
+
     if not st.session_state.logged_in:
         login_page()
     elif st.session_state.user_type == "vendor":
